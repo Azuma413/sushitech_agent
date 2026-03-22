@@ -47,10 +47,8 @@ public class ImageSwitcher : MonoBehaviour
         {
             // 次の画像のインデックスを計算
             currentIndex = (currentIndex + 1) % images.Length;
-            
             // Raw Imageの画像を更新
             rawImage.texture = images[currentIndex];
-            
             // タイマーをリセット
             timer = 0f;
         }

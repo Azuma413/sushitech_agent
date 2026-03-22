@@ -1,2 +1,6 @@
-# sts_agent
-UnityとPythonで動作するSTSエージェント。AI Vtuberのバリアント。
+# sushitech_agent
+
+## setup
+```bash
+uv sync
+```
