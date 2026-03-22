@@ -8,7 +8,7 @@ from typing import Set
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from contextlib import asynccontextmanager
 from .game_master import GameMaster
-from .game_structures import MasterToUnityMessage
+from .game_structures import make_unity_message
 
 # グローバル状態
 game_master: GameMaster = None
@@ -43,26 +43,19 @@ async def websocket_unity(websocket: WebSocket):
         while True:
             data = await websocket.receive_text()
             message = json.loads(data)
-            print(f"📨 Unity from: {message}")
+            msg_type = message.get("type", "")
+            payload = message.get("payload", {})
+            print(f"📨 Unity from: type={msg_type}, payload={payload}")
     except WebSocketDisconnect:
         print(f"❌ Unity 切断")
         unity_websockets.discard(websocket)
 
 
-async def broadcast_to_unity(message: MasterToUnityMessage):
-    """Unity クライアントにブロードキャスト"""
-    msg_dict = {
-        "type": message.type,
-        "emotion": message.emotion,
-        "speech": message.speech,
-        "board_state": message.board_state,
-        "board": message.board,
-        "winner": message.winner,
-        "error_message": message.error_message
-    }
+async def broadcast_to_unity(message: dict):
+    """Unity クライアントにブロードキャスト ({type, payload} 形式)"""
     for ws in unity_websockets:
         try:
-            await ws.send_json(msg_dict)
+            await ws.send_json(message)
         except Exception as e:
             print(f"❌ Unity 送信エラー: {e}")
 
@@ -79,13 +72,10 @@ async def get_game_status():
 async def start_game():
     """ゲームを開始"""
     result = game_master.reset_game()
-    msg = MasterToUnityMessage(
-        type="game_update",
-        emotion="normal",
-        speech="ゲームを開始します！",
-        board_state=result["board"],
-        board=game_master.game_state.board.cells
-    )
+    msg = make_unity_message("game_start", {
+        "board": game_master.game_state.board.cells,
+        "board_state": result["board"],
+    })
     await broadcast_to_unity(msg)
     return result
 
@@ -111,14 +101,13 @@ async def play_turn():
     # 盤面に駒を配置
     game_master.game_state.board.place_mark(ai_response.move, "O")
 
-    # Unity に感情・セリフを送信
-    msg = MasterToUnityMessage(
-        type="speech",
-        emotion=ai_response.emotion,
-        speech=ai_response.speech,
-        board_state=game_master.game_state.board.to_text(),
-        board=game_master.game_state.board.cells
-    )
+    # Unity に感情・セリフ・盤面を送信
+    msg = make_unity_message("speech", {
+        "emotion": ai_response.emotion,
+        "speech": ai_response.speech,
+        "board": game_master.game_state.board.cells,
+        "board_state": game_master.game_state.board.to_text(),
+    })
     await broadcast_to_unity(msg)
 
     # 勝者をチェック
@@ -128,29 +117,19 @@ async def play_turn():
         game_master.game_state.winner = winner
 
         if winner == "draw":
-            result_msg = MasterToUnityMessage(
-                type="game_over",
-                emotion="calm",
-                speech="引き分けです！",
-                board_state=game_master.game_state.board.to_text(),
-                board=game_master.game_state.board.cells
-            )
+            emotion, speech = "calm", "引き分けです！"
         elif winner == "O":
-            result_msg = MasterToUnityMessage(
-                type="game_over",
-                emotion="happy",
-                speech="勝ちました！",
-                board_state=game_master.game_state.board.to_text(),
-                board=game_master.game_state.board.cells
-            )
+            emotion, speech = "happy", "勝ちました！"
         else:
-            result_msg = MasterToUnityMessage(
-                type="game_over",
-                emotion="sad",
-                speech="負けました...",
-                board_state=game_master.game_state.board.to_text(),
-                board=game_master.game_state.board.cells
-            )
+            emotion, speech = "sad", "負けました..."
+
+        result_msg = make_unity_message("game_over", {
+            "winner": winner,
+            "emotion": emotion,
+            "speech": speech,
+            "board": game_master.game_state.board.cells,
+            "board_state": game_master.game_state.board.to_text(),
+        })
         await broadcast_to_unity(result_msg)
 
     # ターンを交代
@@ -166,6 +145,17 @@ async def play_turn():
         "game_over": game_master.game_state.is_game_over,
         "winner": game_master.game_state.winner
     }
+
+
+@app.post("/game/simulate-failure")
+async def simulate_failure(position: int = 4):
+    """テスト用: 配置失敗をシミュレート"""
+    msg = make_unity_message("placement_failure", {
+        "error_message": "コマの配置に失敗しました",
+        "position": position,
+    })
+    await broadcast_to_unity(msg)
+    return {"success": True, "message": "placement_failure sent to Unity"}
 
 
 @app.get("/health")

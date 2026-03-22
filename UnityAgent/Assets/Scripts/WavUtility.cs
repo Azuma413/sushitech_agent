@@ -7,100 +7,116 @@ public static class WavUtility
     {
         try
         {
-            if (wavData == null || wavData.Length < 44)
+            if (wavData == null || wavData.Length < 12)
             {
                 Debug.LogError($"無効なWAVデータです: {(wavData == null ? "null" : $"length={wavData.Length}")}");
                 return null;
             }
 
-            // WAVヘッダーのパース
             // RIFFヘッダーの確認
-            if (wavData[0] != 'R' || wavData[1] != 'I' || wavData[2] != 'F' || wavData[3] != 'F')
+            string riffHeader = System.Text.Encoding.ASCII.GetString(wavData, 0, 4);
+            string waveFormat = System.Text.Encoding.ASCII.GetString(wavData, 8, 4);
+            Debug.Log($"WAVヘッダー: RIFF='{riffHeader}', Format='{waveFormat}'");
+
+            if (riffHeader != "RIFF" || waveFormat != "WAVE")
             {
-                Debug.LogError("RIFFヘッダーが見つかりません");
+                Debug.LogError($"有効なWAVファイルではありません (RIFF='{riffHeader}', Format='{waveFormat}')");
+                // 先頭バイトをダンプしてデバッグ
+                string hexDump = "";
+                for (int h = 0; h < Math.Min(64, wavData.Length); h++)
+                    hexDump += wavData[h].ToString("X2") + " ";
+                Debug.LogError($"先頭64バイト: {hexDump}");
                 return null;
             }
 
-            // WAVEフォーマットの確認
-            if (wavData[8] != 'W' || wavData[9] != 'A' || wavData[10] != 'V' || wavData[11] != 'E')
+            // チャンクベースでパース
+            int channels = 0;
+            int sampleRate = 0;
+            int bitsPerSample = 0;
+            int dataOffset = -1;
+            int dataSize = 0;
+
+            int pos = 12; // "RIFF" + size + "WAVE" の後から開始
+            while (pos < wavData.Length - 8)
             {
-                Debug.LogError("WAVEフォーマットではありません");
-                return null;
-            }
+                string chunkId = System.Text.Encoding.ASCII.GetString(wavData, pos, 4);
+                int chunkSize = BitConverter.ToInt32(wavData, pos + 4);
+                Debug.Log($"チャンク発見: id='{chunkId}', size={chunkSize}, offset={pos}");
 
-            // fmt チャンクの確認
-            if (wavData[12] != 'f' || wavData[13] != 'm' || wavData[14] != 't' || wavData[15] != ' ')
-            {
-                Debug.LogError("fmtチャンクが見つかりません");
-                return null;
-            }
-
-            // フォーマット情報の読み取り
-            int channels = BitConverter.ToInt16(wavData, 22);
-            int sampleRate = BitConverter.ToInt32(wavData, 24);
-            int bitsPerSample = BitConverter.ToInt16(wavData, 34);
-
-            Debug.Log($"WAVフォーマット: チャンネル数={channels}, サンプリングレート={sampleRate}Hz, ビット深度={bitsPerSample}bit");
-
-            // dataチャンクの検索
-            int dataOffset = 44; // 標準的なオフセット
-            while (dataOffset < wavData.Length - 8)
-            {
-                if (wavData[dataOffset] == 'd' && wavData[dataOffset + 1] == 'a' && 
-                    wavData[dataOffset + 2] == 't' && wavData[dataOffset + 3] == 'a')
+                if (chunkId == "fmt ")
                 {
-                    break;
+                    channels = BitConverter.ToInt16(wavData, pos + 10);
+                    sampleRate = BitConverter.ToInt32(wavData, pos + 12);
+                    bitsPerSample = BitConverter.ToInt16(wavData, pos + 22);
+                    Debug.Log($"fmtチャンク解析: ch={channels}, rate={sampleRate}, bits={bitsPerSample}");
                 }
-                dataOffset++;
+                else if (chunkId == "data")
+                {
+                    dataOffset = pos + 8;
+                    dataSize = chunkSize;
+
+                    // dataSizeが0または不正な場合、残りのバイト数をデータサイズとして使う
+                    if (dataSize <= 0 || dataOffset + dataSize > wavData.Length)
+                    {
+                        int remaining = wavData.Length - dataOffset;
+                        Debug.LogWarning($"dataチャンクサイズ補正: {dataSize} -> {remaining}");
+                        dataSize = remaining;
+                    }
+                    break; // dataチャンクが見つかったらループ終了
+                }
+
+                // 次のチャンクへ (チャンクヘッダー8バイト + チャンクデータ)
+                // チャンクサイズが奇数の場合、パディングバイトがある
+                pos += 8 + chunkSize;
+                if (chunkSize % 2 != 0) pos += 1; // パディング
             }
 
-            if (dataOffset >= wavData.Length - 8)
+            if (dataOffset < 0)
             {
                 Debug.LogError("dataチャンクが見つかりません");
                 return null;
             }
 
-            // データサイズの取得
-            int dataSize = BitConverter.ToInt32(wavData, dataOffset + 4);
-            int dataStart = dataOffset + 8;
-
-            if (dataStart + dataSize > wavData.Length)
+            if (channels <= 0 || sampleRate <= 0 || bitsPerSample <= 0)
             {
-                Debug.LogError($"データサイズが不正です: {dataSize} bytes (残りデータ: {wavData.Length - dataStart} bytes)");
+                Debug.LogError($"不正なフォーマット情報: ch={channels}, rate={sampleRate}, bits={bitsPerSample}");
                 return null;
             }
 
-            // サンプル数の計算
-            int samplesPerChannel = dataSize / (bitsPerSample / 8) / channels;
+            int bytesPerSample = bitsPerSample / 8;
+            int samplesPerChannel = dataSize / bytesPerSample / channels;
+            Debug.Log($"データ解析: dataOffset={dataOffset}, dataSize={dataSize}, samplesPerChannel={samplesPerChannel}");
+
+            if (samplesPerChannel <= 0)
+            {
+                Debug.LogError($"サンプル数が0です: dataSize={dataSize}, bytesPerSample={bytesPerSample}, channels={channels}");
+                return null;
+            }
 
             // AudioClipを作成
             var audioClip = AudioClip.Create("voice", samplesPerChannel, channels, sampleRate, false);
 
             // 音声データをfloat配列に変換
             var audioData = new float[samplesPerChannel * channels];
-            int bytesPerSample = bitsPerSample / 8;
 
             for (int i = 0; i < samplesPerChannel * channels; i++)
             {
+                int byteIndex = dataOffset + i * bytesPerSample;
+                if (byteIndex + bytesPerSample > wavData.Length) break;
+
                 switch (bitsPerSample)
                 {
                     case 32:
-                        // 32bitの場合はfloat
-                        float sample32 = BitConverter.ToSingle(wavData, dataStart + i * bytesPerSample);
+                        float sample32 = BitConverter.ToSingle(wavData, byteIndex);
                         audioData[i] = Mathf.Clamp(sample32, -1f, 1f);
                         break;
-
                     case 16:
-                        // 16bitデータをfloatに変換 (-1.0f to 1.0f)
-                        short sample16 = BitConverter.ToInt16(wavData, dataStart + i * bytesPerSample);
+                        short sample16 = BitConverter.ToInt16(wavData, byteIndex);
                         audioData[i] = sample16 / 32768f;
                         break;
-
                     case 8:
-                        // 8bitの場合は unsigned
-                        audioData[i] = (wavData[dataStart + i] - 128) / 128f;
+                        audioData[i] = (wavData[byteIndex] - 128) / 128f;
                         break;
-
                     default:
                         Debug.LogError($"未対応のビット深度です: {bitsPerSample}bit");
                         return null;

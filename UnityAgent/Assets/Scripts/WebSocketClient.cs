@@ -5,56 +5,31 @@ using System.Threading.Tasks;
 using UnityEngine;
 using System.Net.WebSockets;
 
-[Serializable]
-public class SendTextFormat
-{
-    public string type;      // "start_recording" または "stop_recording"
-    public string message;   // その他のメッセージ
-}
-
 public class WebSocketClient : MonoBehaviour
 {
-    [SerializeField] private RecordingButton recordingButton;  // RecordingButtonへの参照
-    [SerializeField] private bool DEBUG = false;  // デバッグモードのフラグ
-    private string serverUrl = "ws://localhost:8000/ws/recording";  // サーバーのURL
+    [SerializeField] private bool DEBUG = false;
+    [SerializeField] private string serverUrl = "ws://localhost:8000/ws/unity";
     private ClientWebSocket webSocket;
     private bool isConnecting = false;
     private bool isConnected = false;
     private bool isQuitting = false;
-private bool Queue_is_empty = false;
-private bool isRecording = false;
 
-    // 録音制御メソッド
-    public async Task StartRecording()
-    {
-        if (!isRecording)
-        {
-            isRecording = true;
-            await SendText("start_recording", "start_recording");
-            Debug.Log("録音開始リクエスト送信");
-        }
-    }
-
-    public async Task StopRecording()
-    {
-        if (isRecording)
-        {
-            isRecording = false;
-            await SendText("stop_recording", "stop_recording");
-            Debug.Log("録音停止リクエスト送信");
-        }
-    }
+    // ===== デバッグ用 =====
 
     private void AddDebugMessages()
     {
-        // エージェント用のデバッグメッセージ
-        GlobalVariables.AgentQueue.Add(new ReceiveMessageFormat
+        // speech メッセージのデバッグ
+        var payload = new SpeechPayload
         {
-            content = "皆さん、今日も元気ですか？ 私は元気です！",
-            action = "Nothing",
             emotion = "happy",
-        });
+            speech = "皆さん、今日も元気ですか？ 私は元気です！",
+            board = new string[] { "", "", "", "", "", "", "", "", "" },
+            board_state = ""
+        };
+        GlobalVariables.SpeechQueue.Add(payload);
     }
+
+    // ===== ライフサイクル =====
 
     async void Start()
     {
@@ -68,19 +43,7 @@ private bool isRecording = false;
         await ConnectToServer();
     }
 
-    void Update()
-    {
-        int count = GlobalVariables.AgentQueue.Count;
-        // Queueが空になったらFinishを送信
-        if (count == 0 && !Queue_is_empty)
-        {
-            Queue_is_empty = true;
-            // await SendText("Finish");
-        }else if (count > 0)
-        {
-            Queue_is_empty = false;
-        }
-    }
+    // ===== WebSocket 接続管理 =====
 
     private async Task ConnectToServer()
     {
@@ -99,8 +62,8 @@ private bool isRecording = false;
         {
             Debug.LogError($"WebSocket connection error: {e.Message}");
             Cleanup();
-            await Task.Delay(5000); // Wait before retrying
-            await ConnectToServer(); // Retry connection
+            await Task.Delay(5000);
+            await ConnectToServer();
         }
         finally
         {
@@ -129,24 +92,28 @@ private bool isRecording = false;
         isConnected = false;
     }
 
-    private async Task SendText(string message, string type = "")
+    // ===== メッセージ送信 =====
+
+    public async Task SendMessage(string type, string payloadJson = "{}")
     {
         if (webSocket == null || webSocket.State != WebSocketState.Open)
         {
             Debug.LogWarning("Cannot send message - WebSocket is not connected");
             return;
         }
+
+        var messageObj = new SendMessageFormat
         {
-            var messageObj = new SendTextFormat { 
-                message = message,
-                type = type
-            };
-            string jsonMessage = JsonUtility.ToJson(messageObj);
-            byte[] buffer = Encoding.UTF8.GetBytes(jsonMessage);
-            await webSocket.SendAsync(new ArraySegment<byte>(buffer), WebSocketMessageType.Text, true, CancellationToken.None);
-            Debug.Log($"Message sent: {jsonMessage}");
-        }
+            type = type,
+            payload = payloadJson
+        };
+        string jsonMessage = JsonUtility.ToJson(messageObj);
+        byte[] buffer = Encoding.UTF8.GetBytes(jsonMessage);
+        await webSocket.SendAsync(new ArraySegment<byte>(buffer), WebSocketMessageType.Text, true, CancellationToken.None);
+        Debug.Log($"Message sent: {jsonMessage}");
     }
+
+    // ===== メッセージ受信 =====
 
     private async void StartReceiving()
     {
@@ -156,7 +123,7 @@ private bool isRecording = false;
             return;
         }
 
-        byte[] buffer = new byte[4096]; // Increased buffer size
+        byte[] buffer = new byte[8192];
         while (webSocket != null && webSocket.State == WebSocketState.Open)
         {
             try
@@ -176,35 +143,8 @@ private bool isRecording = false;
                 }
 
                 string jsonMessage = Encoding.UTF8.GetString(buffer, 0, result.Count);
-                try
-                {
-                    var messageObj = JsonUtility.FromJson<ReceiveMessageFormat>(jsonMessage);
-                    if (messageObj != null)
-                    {
-                        if (!string.IsNullOrEmpty(messageObj.content)){
-                            if (messageObj.action == "Status"){
-                                Debug.Log($"Status message received: {messageObj.content}");
-                                if (messageObj.content == "Recording"){
-                                    GlobalVariables.on_recording = true; // 録音中
-                                }else if (messageObj.content == "Finished"){
-                                    GlobalVariables.on_recording = false; // 録音終了
-                                }
-                            }else{
-                                Debug.Log($"Message received: {messageObj.content}");
-                                GlobalVariables.AgentQueue.Add(messageObj);
-                                // メッセージ受信をRecordingButtonに通知
-                                if (recordingButton != null)
-                                {
-                                    recordingButton.OnMessageReceived();
-                                }
-                            }
-                        }
-                    }
-                }
-                catch (Exception e)
-                {
-                    Debug.LogError($"Error parsing JSON message: {e.Message}");
-                }
+                Debug.Log($"Raw message received: {jsonMessage}");
+                DispatchMessage(jsonMessage);
             }
             catch (WebSocketException e)
             {
@@ -221,13 +161,186 @@ private bool isRecording = false;
         }
     }
 
+    /// <summary>
+    /// 受信した {type, payload} メッセージを type に応じて振り分ける
+    /// </summary>
+    private void DispatchMessage(string jsonMessage)
+    {
+        try
+        {
+            // まず type を取得するためにパース
+            // JsonUtility はネストした JSON オブジェクトを文字列として扱えないため、
+            // 手動で type と payload を抽出する
+            string msgType = ExtractJsonStringField(jsonMessage, "type");
+            string payloadJson = ExtractJsonObjectField(jsonMessage, "payload");
+
+            if (string.IsNullOrEmpty(msgType))
+            {
+                Debug.LogWarning($"Unknown message format (no type): {jsonMessage}");
+                return;
+            }
+
+            Debug.Log($"Dispatching message: type={msgType}");
+
+            switch (msgType)
+            {
+                case "speech":
+                    var speechPayload = JsonUtility.FromJson<SpeechPayload>(payloadJson);
+                    if (speechPayload != null)
+                    {
+                        // 盤面を更新
+                        if (speechPayload.board != null && speechPayload.board.Length == 9)
+                        {
+                            Array.Copy(speechPayload.board, GlobalVariables.CurrentBoard, 9);
+                        }
+                        GlobalVariables.SpeechQueue.Add(speechPayload);
+                        GameEvents.FireSpeech(speechPayload);
+                    }
+                    break;
+
+                case "game_start":
+                    var startPayload = JsonUtility.FromJson<GameStartPayload>(payloadJson);
+                    if (startPayload != null)
+                    {
+                        GlobalVariables.IsGameActive = true;
+                        if (startPayload.board != null && startPayload.board.Length == 9)
+                        {
+                            Array.Copy(startPayload.board, GlobalVariables.CurrentBoard, 9);
+                        }
+                        GameEvents.FireGameStart(startPayload);
+                    }
+                    break;
+
+                case "game_over":
+                    var overPayload = JsonUtility.FromJson<GameOverPayload>(payloadJson);
+                    if (overPayload != null)
+                    {
+                        GlobalVariables.IsGameActive = false;
+                        if (overPayload.board != null && overPayload.board.Length == 9)
+                        {
+                            Array.Copy(overPayload.board, GlobalVariables.CurrentBoard, 9);
+                        }
+                        GameEvents.FireGameOver(overPayload);
+                    }
+                    break;
+
+                case "placement_failure":
+                    var failPayload = JsonUtility.FromJson<PlacementFailurePayload>(payloadJson);
+                    if (failPayload != null)
+                    {
+                        GameEvents.FirePlacementFailure(failPayload);
+                    }
+                    break;
+
+                case "error":
+                    var errorPayload = JsonUtility.FromJson<ErrorPayload>(payloadJson);
+                    if (errorPayload != null)
+                    {
+                        GameEvents.FireError(errorPayload);
+                    }
+                    break;
+
+                default:
+                    Debug.LogWarning($"Unknown message type: {msgType}");
+                    break;
+            }
+        }
+        catch (Exception e)
+        {
+            Debug.LogError($"Error dispatching message: {e.Message}\n{e.StackTrace}");
+        }
+    }
+
+    // ===== JSON ヘルパー =====
+    // JsonUtility はネストオブジェクトをフラットにしか扱えないため、
+    // 手動で簡易パースを行う
+
+    /// <summary>
+    /// JSON文字列から指定したキーの文字列値を抽出する (簡易パーサー)
+    /// </summary>
+    private string ExtractJsonStringField(string json, string fieldName)
+    {
+        string pattern = $"\"{fieldName}\"";
+        int keyIndex = json.IndexOf(pattern);
+        if (keyIndex < 0) return null;
+
+        int colonIndex = json.IndexOf(':', keyIndex + pattern.Length);
+        if (colonIndex < 0) return null;
+
+        int startQuote = json.IndexOf('"', colonIndex + 1);
+        if (startQuote < 0) return null;
+
+        int endQuote = json.IndexOf('"', startQuote + 1);
+        if (endQuote < 0) return null;
+
+        return json.Substring(startQuote + 1, endQuote - startQuote - 1);
+    }
+
+    /// <summary>
+    /// JSON文字列から指定したキーのオブジェクト値を抽出する (簡易パーサー)
+    /// ネストされた {} を正しくカウントして抽出する
+    /// </summary>
+    private string ExtractJsonObjectField(string json, string fieldName)
+    {
+        string pattern = $"\"{fieldName}\"";
+        int keyIndex = json.IndexOf(pattern);
+        if (keyIndex < 0) return "{}";
+
+        int colonIndex = json.IndexOf(':', keyIndex + pattern.Length);
+        if (colonIndex < 0) return "{}";
+
+        // コロンの後の最初の '{' を見つける
+        int braceStart = json.IndexOf('{', colonIndex + 1);
+        if (braceStart < 0) return "{}";
+
+        // 対応する '}' を見つける (ネスト対応)
+        int depth = 0;
+        bool inString = false;
+        bool escaped = false;
+        for (int i = braceStart; i < json.Length; i++)
+        {
+            char c = json[i];
+            if (escaped)
+            {
+                escaped = false;
+                continue;
+            }
+            if (c == '\\')
+            {
+                escaped = true;
+                continue;
+            }
+            if (c == '"')
+            {
+                inString = !inString;
+                continue;
+            }
+            if (!inString)
+            {
+                if (c == '{') depth++;
+                else if (c == '}')
+                {
+                    depth--;
+                    if (depth == 0)
+                    {
+                        return json.Substring(braceStart, i - braceStart + 1);
+                    }
+                }
+            }
+        }
+
+        return "{}";
+    }
+
+    // ===== 切断ハンドリング =====
+
     private async Task HandleDisconnection()
     {
         Cleanup();
         if (!isQuitting)
         {
             Debug.Log("Attempting to reconnect...");
-            await Task.Delay(3000); // Wait before reconnecting
+            await Task.Delay(3000);
             await ConnectToServer();
         }
         else

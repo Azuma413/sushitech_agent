@@ -2,19 +2,13 @@
 Master モジュール - 三目並べゲームの主管者
 ゲーム管理、LLM呼び出し、他モジュールとの通信
 """
-
 import os
 from typing import Optional
-
 from openai import OpenAI
 from dotenv import load_dotenv
-
-from .game_structures import (
-    GameBoard, GameState, AIResponse, MasterToUnityMessage
-)
+from .game_structures import GameBoard, GameState, AIResponse
 
 load_dotenv()
-
 
 class GameMaster:
     """三目並べゲームの主管者"""

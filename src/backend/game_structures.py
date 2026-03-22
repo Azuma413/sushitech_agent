@@ -3,7 +3,8 @@
 """
 
 from dataclasses import dataclass, field
-from typing import Literal, List
+from typing import Literal, List, Optional, Any, Dict
+
 
 @dataclass
 class GameBoard:
@@ -93,6 +94,7 @@ class GameState:
 
 
 # ===== WebSocket メッセージ型 =====
+# 通信フォーマット: {"type": "xxx", "payload": {...}}
 
 @dataclass
 class MasterToRobotMessage:
@@ -110,16 +112,21 @@ class RobotToMasterMessage:
     board: List[Literal["", "O", "X"]] = field(default_factory=lambda: [""] * 9)
 
 
-@dataclass
-class MasterToUnityMessage:
-    """Master → Unity: 感情・セリフ・盤面"""
-    type: Literal["speech", "game_update", "game_over", "placement_failure", "error"] = "speech"
-    emotion: Literal["normal", "happy", "angry", "sad", "surprised", "shy", "excited", "smug", "calm"] = "normal"
-    speech: str = ""
-    board_state: str = ""  # ゲーム状態の表示用テキスト（改行付き）
-    board: List[Literal["", "O", "X"]] = field(default_factory=lambda: [""] * 9)  # 盤面配列（プログラム処理用）
-    winner: Literal["O", "X", "draw", None] = None
-    error_message: str = ""
+def make_unity_message(msg_type: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Unity向けメッセージを {type, payload} フォーマットで生成
+
+    Args:
+        msg_type: メッセージタイプ ("speech", "game_start", "game_over", "placement_failure", "error")
+        payload: タイプに応じたペイロード辞書
+
+    Returns:
+        {"type": msg_type, "payload": payload}
+    """
+    return {
+        "type": msg_type,
+        "payload": payload,
+    }
 
 
 @dataclass
